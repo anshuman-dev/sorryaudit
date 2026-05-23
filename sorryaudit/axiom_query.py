@@ -1,13 +1,14 @@
 """
-Generates a Lean 4 script that runs `#print axioms` on every theorem
-in the project, then parses the output to find sorry/axiom taint.
+Generates and runs `#print axioms` queries against Lean 4 projects,
+then parses the output to find sorry/axiom taint.
 """
 import subprocess
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 # Axioms that are part of Lean 4's blessed standard set - not taint
@@ -21,6 +22,8 @@ STANDARD_AXIOMS = {
 SORRY_AXIOM = "sorryAx"
 
 AXIOM_LINE = re.compile(r"'([^']+)' depends on axioms: \[([^\]]*)\]")
+NAMESPACE_RE = re.compile(r'^\s*namespace\s+(\S+)', re.MULTILINE)
+OPEN_RE = re.compile(r'^\s*open\s+([\w\.]+(?:\s+[\w\.]+)*)', re.MULTILINE)
 
 
 @dataclass
@@ -59,6 +62,33 @@ def build_lake_project(lake_bin: str, project_root: Path) -> bool:
     return result.returncode == 0
 
 
+def _module_name_from_path(source_file: Path, project_root: Path) -> str:
+    """
+    Derive a Lean module name from the file path relative to the project root.
+    e.g. lean-tcb/LeanTcb/Format.lean -> LeanTcb.Format
+    """
+    try:
+        rel = source_file.resolve().relative_to(project_root.resolve())
+        parts = list(rel.with_suffix("").parts)
+        return ".".join(parts)
+    except ValueError:
+        return source_file.stem
+
+
+def _extract_opens(source: str) -> List[str]:
+    """
+    Collect all namespace and open declarations from the source
+    so we can reproduce the name resolution context in our query file.
+    """
+    opens = []
+    for m in NAMESPACE_RE.finditer(source):
+        opens.append(m.group(1))
+    for m in OPEN_RE.finditer(source):
+        for name in m.group(1).split():
+            opens.append(name)
+    return list(dict.fromkeys(opens))  # deduplicate, preserve order
+
+
 def run_axiom_queries_on_file(
     lean_bin: str,
     source_file: Path,
@@ -67,33 +97,80 @@ def run_axiom_queries_on_file(
     project_root: Optional[Path] = None,
 ) -> str:
     """
-    Appends #print axioms queries to a copy of source_file and runs Lean on it.
-    If lake_bin is given, uses `lake env lean` so imports resolve against built .olean files.
+    Query #print axioms for each theorem in source_file.
+
+    For plain projects: appends queries directly to a copy of the source file.
+    For Lake projects: creates a standalone import-based query file at the
+    project root so namespace resolution and module imports work correctly.
     """
+    if lake_bin and project_root:
+        return _run_lake_query(lean_bin, lake_bin, source_file, theorem_names, project_root)
+    else:
+        return _run_inline_query(lean_bin, source_file, theorem_names)
+
+
+def _run_inline_query(lean_bin: str, source_file: Path, theorem_names: List[str]) -> str:
+    """Append #print axioms to the source file and run lean on it."""
     original = source_file.read_text(errors="replace")
     queries = "\n".join(f"#print axioms {name}" for name in theorem_names)
-    augmented = original + "\n\n-- sorryaudit queries\n" + queries + "\n"
+    augmented = original + "\n\n-- sorryaudit\n" + queries + "\n"
 
     tmp_path = source_file.with_suffix(".sorryaudit_tmp.lean")
     try:
         tmp_path.write_text(augmented)
-
-        if lake_bin and project_root:
-            cmd = [lake_bin, "env", lean_bin, str(tmp_path.resolve())]
-            cwd = project_root
-        else:
-            cmd = [lean_bin, tmp_path.name]
-            cwd = source_file.parent
-
         result = subprocess.run(
-            cmd,
-            cwd=cwd,
+            [lean_bin, tmp_path.name],
+            cwd=source_file.parent,
             capture_output=True,
             text=True,
             timeout=300,
         )
         return result.stdout + result.stderr
     finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _run_lake_query(
+    lean_bin: str,
+    lake_bin: str,
+    source_file: Path,
+    theorem_names: List[str],
+    project_root: Path,
+) -> str:
+    """
+    Create a standalone query file at the project root that imports the
+    module and opens its namespaces, then runs #print axioms.
+    This avoids the namespace-closed / path-resolution problems that arise
+    when appending queries directly to a submodule file.
+    """
+    source = source_file.read_text(errors="replace")
+    module = _module_name_from_path(source_file, project_root)
+    opens = _extract_opens(source)
+
+    lines = [f"import {module}"]
+    for ns in opens:
+        lines.append(f"open {ns}")
+    lines.append("")
+    for name in theorem_names:
+        lines.append(f"#print axioms {name}")
+
+    script = "\n".join(lines)
+
+    tmp_fd, tmp_str = tempfile.mkstemp(suffix=".lean", dir=project_root, prefix="sorryaudit_")
+    tmp_path = Path(tmp_str)
+    try:
+        tmp_path.write_text(script)
+        result = subprocess.run(
+            [lake_bin, "env", lean_bin, str(tmp_path.resolve())],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        return result.stdout + result.stderr
+    finally:
+        import os
+        os.close(tmp_fd)
         tmp_path.unlink(missing_ok=True)
 
 
