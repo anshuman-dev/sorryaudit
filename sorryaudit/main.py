@@ -20,7 +20,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 from parser import analyse_project
-from axiom_query import run_axiom_queries_on_file, parse_axiom_output
+from axiom_query import run_axiom_queries_on_file, parse_axiom_output, find_lake, build_lake_project
 from report import merge, render_text, render_json
 
 
@@ -42,6 +42,8 @@ def main():
     ap.add_argument("--lean", default=None, help="Path to lean binary")
     ap.add_argument("--no-semantic", action="store_true",
                     help="Skip #print axioms pass (syntactic only, faster)")
+    ap.add_argument("--no-build", action="store_true",
+                    help="Skip lake build (use if project is already built)")
     args = ap.parse_args()
 
     root = Path(args.project).resolve()
@@ -50,6 +52,18 @@ def main():
         sys.exit(1)
 
     lean_bin = find_lean(args.lean)
+
+    # Detect Lake and build if needed
+    lake_bin = find_lake(root)
+    if lake_bin:
+        print(f"[0/3] Lake project detected.", file=sys.stderr)
+        if not args.no_semantic and not args.no_build:
+            print(f"      Running lake build ...", file=sys.stderr)
+            ok = build_lake_project(lake_bin, root)
+            if not ok:
+                print("      lake build failed - semantic pass may be incomplete", file=sys.stderr)
+        else:
+            print(f"      Skipping lake build (--no-build)", file=sys.stderr)
 
     print(f"[1/3] Parsing .lean files in {root} ...", file=sys.stderr)
     file_analyses = analyse_project(root)
@@ -65,7 +79,10 @@ def main():
                 continue
             names = [t.name for t in fa.theorems]
             print(f"      Querying {fa.path.name} ({len(names)} theorems) ...", file=sys.stderr)
-            output = run_axiom_queries_on_file(lean_bin, fa.path, names)
+            output = run_axiom_queries_on_file(
+                lean_bin, fa.path, names,
+                lake_bin=lake_bin, project_root=root,
+            )
             axiom_results.extend(parse_axiom_output(output))
         print(f"      Got axiom data for {len(axiom_results)} theorems", file=sys.stderr)
     else:
