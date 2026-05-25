@@ -28,16 +28,42 @@ This is not hypothetical. The "Who Watches the Watchers?" post by Kiran found a 
 
 Both passes run by default. The semantic pass result takes precedence where available; the syntactic pass covers the rest.
 
+## Quickstart
+
+```bash
+# 1. Clone this repo
+git clone https://github.com/anshuman-dev/sorryaudit.git
+cd sorryaudit
+
+# 2. Install Lean 4 via elan (skip if already installed)
+curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
+
+# 3. Run on the included demo file (no extra setup needed)
+python3 sorryaudit/main.py demo
+```
+
+The demo file (`demo/AIGenerated.lean`) simulates AI-generated proof output with 8 theorems — some directly sorry-tainted, some with no sorry visible in their body but transitively tainted, and some fully trusted. Expected output: 4 UNSOUND, 1 SUSPECT, 3 TRUSTED, overall score 45%.
+
+To run on a real-world project:
+
+```bash
+# Clone lean-tcb (a Lean 4 library with a deliberate sorry for testing)
+git clone https://github.com/OathTech/lean-tcb.git
+
+# Run sorryaudit - lake build runs automatically
+python3 sorryaudit/main.py lean-tcb
+```
+
 ## Usage
 
 ```
-python sorryaudit/main.py <path-to-lean4-project>
+python3 sorryaudit/main.py <path-to-lean4-project-or-file>
 ```
 
 Options:
 
 ```
---no-semantic     syntactic pass only, faster
+--no-semantic     syntactic pass only, faster, no Lean required
 --no-build        skip lake build (use if project is already built)
 --json            output JSON instead of text
 --lean <path>     path to lean binary if not on PATH
@@ -85,29 +111,26 @@ Verdicts:
 `lean-tcb` is a Lean 4 library for auditing trusted computing bases. Running sorryaudit on it:
 
 ```
-$ python sorryaudit/main.py lean-tcb
+$ python3 sorryaudit/main.py lean-tcb
 [0/3] Lake project detected.
       Running lake build ...
-[1/3] Parsing .lean files ...
+[1/3] Parsing .lean files in lean-tcb ...
       Found 117 theorems across 23 files
 [2/3] Running #print axioms queries via Lean ...
-      Got axiom data for 18 theorems
+      Got axiom data for 117 theorems
 [3/3] Building report ...
 
-Overall score: 98.3%  |  Trusted: 113  |  Unsound: 1  |  Suspect: 2
+Theorems: 117  |  Overall score: 98.7%
+Trusted : 114  |  Unsound: 1  |  Suspect: 2
 ```
 
-The one UNSOUND theorem is `sorryThm : 1 + 1 = 3` - a theorem lean-tcb includes deliberately to test its own soundness checker. Our tool catches it via Lean's own `#print axioms` machinery.
+The one UNSOUND theorem is `sorryThm : 1 + 1 = 3` - a theorem lean-tcb includes deliberately to test its own soundness checker. sorryaudit catches it via Lean's own `#print axioms` machinery, not by grepping for the word `sorry`.
 
-## Installation
+## Requirements
 
-Requires Python 3.9+ and Lean 4 (install via [elan](https://github.com/leanprover/elan)).
-
-```
-curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
-```
-
-No other dependencies.
+- Python 3.9+
+- Lean 4 via [elan](https://github.com/leanprover/elan) (only needed for the semantic pass)
+- No additional Python packages
 
 ## Hackathon context
 
