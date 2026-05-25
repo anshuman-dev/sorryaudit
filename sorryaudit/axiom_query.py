@@ -62,17 +62,50 @@ def build_lake_project(lake_bin: str, project_root: Path) -> bool:
     return result.returncode == 0
 
 
+SRCDIR_RE = re.compile(r'srcDir\s*:=\s*["\']([^"\']*)["\']')
+
+
+def _lake_src_roots(project_root: Path) -> List[Path]:
+    """
+    Parse lakefile.lean / lakefile.toml for srcDir declarations.
+    Returns a list of resolved source root paths, most specific first.
+    Falls back to [project_root] if nothing found.
+    """
+    roots = []
+    for lakefile in ["lakefile.lean", "lakefile.toml"]:
+        lf = project_root / lakefile
+        if lf.exists():
+            text = lf.read_text(errors="replace")
+            for m in SRCDIR_RE.finditer(text):
+                src = m.group(1).strip()
+                if src == ".":
+                    candidate = project_root
+                else:
+                    candidate = project_root / src
+                if candidate.exists() and candidate not in roots:
+                    roots.append(candidate)
+    if project_root not in roots:
+        roots.append(project_root)
+    # Sort longest path first so most specific root matches first
+    return sorted(roots, key=lambda p: len(str(p)), reverse=True)
+
+
 def _module_name_from_path(source_file: Path, project_root: Path) -> str:
     """
-    Derive a Lean module name from the file path relative to the project root.
-    e.g. lean-tcb/LeanTcb/Format.lean -> LeanTcb.Format
+    Derive a Lean module name by finding which srcDir the file belongs to.
+    e.g. lean-tcb/test/LeanTcbTest/Soundness.lean
+         with srcDir "test" -> LeanTcbTest.Soundness
     """
-    try:
-        rel = source_file.resolve().relative_to(project_root.resolve())
-        parts = list(rel.with_suffix("").parts)
-        return ".".join(parts)
-    except ValueError:
-        return source_file.stem
+    src_roots = _lake_src_roots(project_root)
+    resolved = source_file.resolve()
+    for root in src_roots:
+        try:
+            rel = resolved.relative_to(root.resolve())
+            parts = list(rel.with_suffix("").parts)
+            return ".".join(parts)
+        except ValueError:
+            continue
+    return source_file.stem
 
 
 def _extract_opens(source: str) -> List[str]:
